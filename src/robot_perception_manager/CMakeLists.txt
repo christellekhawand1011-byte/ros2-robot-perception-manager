@@ -10,13 +10,20 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(robot_perception_interfaces REQUIRED)
 
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+
 add_executable(perception_manager src/perception_manager.cpp)
 ament_target_dependencies(perception_manager 
   rclcpp)
 
 add_executable(camera_tf_broadcaster src/camera_tf_broadcaster.cpp)
 ament_target_dependencies(camera_tf_broadcaster 
-  rclcpp)
+  rclcpp
+  geometry_msgs
+  tf2
+  tf2_ros)
 
 install(TARGETS
   perception_manager
