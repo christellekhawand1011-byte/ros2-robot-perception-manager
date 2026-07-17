@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(action_msgs REQUIRED)
 find_package(robot_perception_interfaces REQUIRED)
+find_package(ament_index_python REQUIRED)
 
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -20,7 +21,8 @@ add_executable(perception_manager src/perception_manager.cpp)
 ament_target_dependencies(perception_manager 
   robot_perception_interfaces
   rclcpp
-  rclcpp_action)
+  rclcpp_action
+  action_msgs)
 
 add_executable(camera_tf_broadcaster src/camera_tf_broadcaster.cpp)
 ament_target_dependencies(camera_tf_broadcaster 
@@ -33,6 +35,11 @@ install(TARGETS
   perception_manager
   camera_tf_broadcaster
   DESTINATION lib/${PROJECT_NAME})
+
+install(
+  DIRECTORY launch config
+  DESTINATION share/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

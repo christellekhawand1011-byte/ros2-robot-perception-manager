@@ -158,11 +158,11 @@ private:
                 }
 
             if (next_goal){
-                // Start the replacement goal immediately after the old one
-                // has published its CANCELED result
                 RCLCPP_INFO(this->get_logger(),
                     "Starting the pending detection goal");
 
+                // Start the replacement goal immediately after the old one
+                // has published its CANCELED result
                 start_execution(next_goal);
             }
 
