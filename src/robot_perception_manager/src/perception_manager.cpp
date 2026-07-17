@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <random>
 #include <atomic>
+#include <mutex>
 
 #include "robot_perception_interfaces/srv/set_confidence_threshold.hpp"
 #include "robot_perception_interfaces/action/start_detection.hpp"
 #include "robot_perception_interfaces/msg/detection.hpp"
+#include "action_msgs/srv/cancel_goal.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 
@@ -41,6 +43,11 @@ public:
             std::bind(&PerceptionManager::handle_accepted, this, 
                 std::placeholders::_1));
 
+        // Create the internal cancellation client
+        // This allows the server to place the active goal in the CANCELING state
+        cancel_goal_client_ =this->create_client
+            <action_msgs::srv::CancelGoal>("/start_detection/_action/cancel_goal");
+
         // Create the"/set_confidence" service server
         set_confidence_service_ = this->create_service<
             robot_perception_interfaces::srv::SetConfidenceThreshold>
@@ -55,6 +62,48 @@ public:
     }
 
 private:
+    // Starts action execution in a separate thread so the ROS executor
+    // remains available to receive services, cancellations, and new goals
+    void start_execution(
+        const std::shared_ptr<GoalHandleStartDetection> goal_handle)
+    {
+        std::thread{std::bind(&PerceptionManager::execute, this,
+            std::placeholders::_1), goal_handle}.detach();
+    }
+
+    // Sends a cancellation request for a specific active goal
+    void request_internal_cancellation(
+        const std::shared_ptr<GoalHandleStartDetection> goal_handle)
+    {
+        auto request =
+            std::make_shared<action_msgs::srv::CancelGoal::Request>();
+
+        // Copy the active goal's unique ID so only this goal is canceled
+        request->goal_info.goal_id.uuid = goal_handle->get_goal_id();
+
+        // A zero timestamp means the request targets the specified goal ID
+        request->goal_info.stamp.sec = 0;
+        request->goal_info.stamp.nanosec = 0;
+
+        // Send the request asynchronously so the node remains responsive
+        cancel_goal_client_->async_send_request(request,
+            [this](rclcpp::Client<action_msgs::srv::CancelGoal>::
+            SharedFuture future)
+        {
+            const auto response = future.get();
+
+            // A non-empty list confirms that the goal entered canceling state
+            if (!response->goals_canceling.empty()){
+                RCLCPP_INFO(this->get_logger(),
+                "Preemption cancellation request accepted");
+            }
+            else{
+                RCLCPP_WARN(this->get_logger(),
+                    "Preemption cancellation request was not accepted");
+            }
+        });
+    }
+
     // Executes the accepted detection goal
     void execute(const std::shared_ptr<GoalHandleStartDetection> goal_handle){
         RCLCPP_INFO(this->get_logger(), "Executing detection goal");
@@ -75,14 +124,50 @@ private:
 
         while (rclcpp::ok()) {
             // Check if there is a cancel request
-            if (goal_handle->is_canceling()) {
+            if (goal_handle->is_canceling()){
+                // Fill the final result for the goal being canceled
                 result->total_detections = detections_count;
                 result->success = false;
 
+                // Publish a genuine CANCELED result to the action client
                 goal_handle->canceled(result);
-                RCLCPP_INFO(this->get_logger(), "Detection goal canceled");
-                return;
+
+                RCLCPP_INFO(this->get_logger(),
+                    "Detection goal canceled after %d detections",
+                    detections_count);
+
+                std::shared_ptr<GoalHandleStartDetection>
+                next_goal;
+
+                {
+                    // Safely update the active and pending goal pointers
+                    std::lock_guard<std::mutex> lock(goal_mutex_);
+
+                    if (active_goal_ == goal_handle){
+                        // The canceled goal is no longer active
+                        active_goal_.reset();
+
+                        if (pending_goal_){
+                            // Promote the waiting goal to become the new active goal
+                            next_goal = pending_goal_;
+                            pending_goal_.reset();
+
+                            active_goal_ = next_goal;
+                        }
+                    }
+                }
+
+            if (next_goal){
+                // Start the replacement goal immediately after the old one
+                // has published its CANCELED result
+                RCLCPP_INFO(this->get_logger(),
+                    "Starting the pending detection goal");
+
+                start_execution(next_goal);
             }
+
+            return;
+        }
 
             robot_perception_interfaces::msg::Detection detection;
 
@@ -148,10 +233,45 @@ private:
     }
 
     // Called after ROS 2 accepts the goal
-    void handle_accepted(const std::shared_ptr<GoalHandleStartDetection> gh)
+    void handle_accepted(const std::shared_ptr
+        <GoalHandleStartDetection> goal_handle)
     {
-        std::thread{std::bind(&PerceptionManager::execute, this,
-            std::placeholders::_1), gh}.detach();
+        std::shared_ptr<GoalHandleStartDetection>goal_to_cancel;
+
+        bool start_immediately = false;
+
+        {
+            // Protect goal pointers because this callback and execute()
+            // may access them from different threads
+            std::lock_guard<std::mutex> lock(goal_mutex_);
+
+            // No goal is running, so this goal can start immediately
+            if (!active_goal_){
+                active_goal_ = goal_handle;
+                start_immediately = true;
+            }
+            else{
+                // Store the new goal until the current goal finishes canceling
+                pending_goal_ = goal_handle;
+                // Keep a local copy of the current goal to cancel after
+                // releasing the mutex
+                goal_to_cancel = active_goal_;
+            }
+        }
+
+        if (start_immediately){
+            RCLCPP_INFO(this->get_logger(),
+                "Starting newly accepted detection goal");
+
+            start_execution(goal_handle);
+        }
+        else{
+            RCLCPP_INFO(this->get_logger(),
+                "New goal received: canceling the current goal");
+
+            // Request a real ROS 2 cancellation for the active goal
+            request_internal_cancellation(goal_to_cancel);
+        }
     }
 
     // Service callback
@@ -190,6 +310,18 @@ private:
     
     rclcpp::Service<robot_perception_interfaces::srv::SetConfidenceThreshold>::SharedPtr 
         set_confidence_service_;
+
+    // Protects shared goal pointers accessed by multiple threads
+    std::mutex goal_mutex_;
+    // Stores the goal that is currently being executed
+    std::shared_ptr<GoalHandleStartDetection> active_goal_;
+    // Stores a newly accepted goal while the current goal is being canceled
+    std::shared_ptr<GoalHandleStartDetection> pending_goal_;
+
+    // Internal client used to send a real cancellation request
+    // to the action server's cancel service
+    rclcpp::Client<action_msgs::srv::CancelGoal>::SharedPtr
+        cancel_goal_client_;
 
     // The service callback and the action thread may access confidence_threshold
     // at the same time.
