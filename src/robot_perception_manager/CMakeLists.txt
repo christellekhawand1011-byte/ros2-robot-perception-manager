@@ -16,6 +16,7 @@ find_package(tf2_ros REQUIRED)
 
 add_executable(perception_manager src/perception_manager.cpp)
 ament_target_dependencies(perception_manager 
+  robot_perception_interfaces
   rclcpp)
 
 add_executable(camera_tf_broadcaster src/camera_tf_broadcaster.cpp)

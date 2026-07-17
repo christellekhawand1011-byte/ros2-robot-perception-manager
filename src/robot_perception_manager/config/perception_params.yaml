@@ -1,0 +1,12 @@
+perception_manager:
+  ros__parameters:
+    confidence_threshold: 0.5
+
+camera_tf_broadcaster:
+  ros__parameters:
+    tx: 0.20
+    ty: 0.00
+    tz: 1.10
+    roll: 0.00
+    pitch: 0.00
+    yaw: 0.00
